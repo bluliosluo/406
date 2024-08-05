@@ -1,0 +1,442 @@
+---
+title: "406 Final Project"
+output: pdf_document
+date: "2023-10-21"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+install.packages("broom")
+install.packages("car")
+```
+# Small dataset
+```{r}
+ytb = read.csv('/Users/jasminejiax/Desktop/STATS 406/final project/Global YouTube Statistics.csv')
+library(ggplot2)
+library(dplyr)
+library(broom)
+library(car)
+library(boot)
+library(stringr)
+library(brms)
+```
+
+```{r}
+ytb <- na.omit(ytb)
+ytb <- ytb[!duplicated(ytb), ]
+
+ytb$years <- 2023 - ytb$created_year
+ytb$years_int <- as.integer(ytb$years)
+ytb$years <- NULL
+ytb$video_upload_freq <- ytb$uploads/ytb$years_int
+ytb <- ytb %>% rename(tertiary_edu_enroll = Gross.tertiary.education.enrollment....)
+```
+
+# Calculate Success Index
+```{r}
+# Normalize the variables using Min-Max normalization
+normalize <- function(x) {
+  return((x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE)))
+}
+
+ytb <- ytb %>%
+  mutate(
+    norm_low_yearly_earnings = normalize(lowest_yearly_earnings),
+    norm_low_monthly_earnings = normalize(lowest_monthly_earnings),
+    norm_high_yearly_earnings = normalize(highest_yearly_earnings),
+    norm_high_monthly_earnings = normalize(highest_monthly_earnings),
+    norm_subscribers = normalize(subscribers),
+    norm_video_views = normalize(video.views)
+  )
+
+# Assign weights to each variable
+weight_yearly_earnings <- 0.25
+weight_monthly_earnings <- 0.25
+weight_subscribers <- 0.25
+weight_video_views <- 0.25
+
+# Calculate the Success Index
+ytb <- ytb %>%
+  mutate(
+    success_index = norm_low_yearly_earnings * 0.1 +
+                    norm_high_yearly_earnings * 0.1 +
+                    norm_low_monthly_earnings * 0.1 +
+                    norm_high_monthly_earnings * 0.1 +
+                    norm_subscribers *  0.3 +
+                    norm_video_views *  0.3
+  )
+```
+
+# LR
+```{r}
+lr <- lm(success_index ~ tertiary_edu_enroll + 
+                       Population + Unemployment.rate + Urban_population + 
+                       Latitude + Longitude, 
+                       data = ytb)
+
+summary(lr)
+
+vif(lr)  # Check for multicollinearity
+
+# Plot diagnostics
+plot(lr)
+```
+```{r}
+# Define a function for the bootstrap procedure
+bootstrap_function <- function(data, indices) {
+  # Allows the bootstrap to sample with replacement
+  d <- data[indices, ]  # Resample the data
+  fit <- lm(success_index ~ tertiary_edu_enroll + 
+                            Population + Unemployment.rate + Urban_population + 
+                            Latitude + Longitude, 
+            data = d)
+  return(coef(fit))
+}
+
+# Set the number of bootstrap replications
+k <- 1000
+
+# Apply the bootstrap
+set.seed(123)  # for reproducibility
+bootstrap_results <- boot(data = ytb, statistic = bootstrap_function, R = k)
+
+# Display the results of the bootstrap
+print(bootstrap_results)
+
+# Obtain and print basic bootstrap confidence intervals
+boot_conf_intervals <- boot.ci(bootstrap_results, type = "all")
+print(boot_conf_intervals)
+
+# Optional: You can plot the bootstrap distributions of coefficients
+# for example, for the first coefficient (intercept)
+hist(bootstrap_results$t[, 4], main = "Bootstrap Distribution of Intercept", xlab = "Coefficient Value", breaks = 30)
+```
+# Smoothing Method
+
+```{r}
+# Scatter plot with LOWESS smoothing
+ggplot(ytb, aes(x = video_views_for_the_last_30_days, y = Unemployment.rate)) +
+  geom_point() +  # Add points
+  geom_smooth(method = "loess", se = FALSE) +  # Add LOWESS curve
+  theme_minimal() +
+  labs(title = "Relationship between Tertiary Education Enrollment and Success Index",
+       x = "Gross Tertiary Education Enrollment (%)",
+       y = "Success Index")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+# Large dataset
+
+# Data preprocessing
+```{r}
+library(dplyr)
+library(readr)
+path_to_files <- "/Users/jasminejiax/Desktop/STATS 406/final project/Trending YouTube Video Statistics"
+# Create a vector of all CSV file names in the folder
+file_names <- list.files(path = path_to_files, pattern = "*.csv", full.names = TRUE)
+
+# Function to extract country name from file name
+extract_country <- function(file_path) {
+  file_name <- tools::file_path_sans_ext(basename(file_path))
+  return(file_name)
+}
+
+# Read, mutate, and combine all CSV files
+trending_ytb <- lapply(file_names, function(file) {
+  # Read the CSV file
+  data <- read_csv(file)
+  # Extract the country from the file name
+  country_name <- extract_country(file)
+  # Add the country name as a new column
+  mutate(data, country = country_name)
+}) %>%
+  bind_rows()
+
+trending_ytb <- trending_ytb %>%
+  filter(comments_disabled == FALSE) %>%
+  filter(ratings_disabled == FALSE) %>%
+  filter(video_error_or_removed == FALSE) %>%
+  mutate(country = str_sub(country, 1, 2)) %>%
+  select(video_id, trending_date, channel_title, category_id, views, likes, dislikes, comment_count, country) 
+
+trending_ytb <- trending_ytb %>%
+  mutate(country = case_when(
+    country == "RU" ~ "Russia",
+    country == "MX" ~ "Mexico",
+    country == "KR" ~ "South Korea",
+    country == "JP" ~ "Japan",
+    country == "IN" ~ "India",
+    country == "US" ~ "USA",
+    country == "GB" ~ "Great Britain",
+    country == "DE" ~ "Germany",
+    country == "CA" ~ "Canada",
+    country == "FR" ~ "France",
+    TRUE ~ country  # Keeps the original value if none of the above conditions are met
+  )) %>% 
+  rename(Country = country) %>%
+  print
+
+# Merge the demographic and socioeconomic variables into one large dataset
+ytb_selected <- ytb %>%
+  select(Country, tertiary_edu_enroll, Population, Unemployment.rate, Urban_population, Latitude, Longitude)
+
+merged_data <- inner_join(trending_ytb, ytb_selected, by = "Country")
+merged_data <- merged_data %>%
+  distinct(video_id, .keep_all = TRUE) %>%
+  na.omit()
+
+merged_data$success_index <- apply(scale(merged_data[, c("views", "likes", "comment_count")]), 1, mean)
+```
+
+
+# Bayesian MCMC
+```{r}
+std_logviews <- sd(merged_data$logviews, na.rm = TRUE)
+
+bayesian_model <- brm(
+  logviews ~ tertiary_edu_enroll + Population + Unemployment.rate +  Urban_population + Latitude + Longitude,
+  data = merged_data,
+  family = gaussian(),
+  prior = c(
+    set_prior("normal(0, 1)", class = "b", coef = "tertiary_edu_enroll"),
+    set_prior("normal(0, 0.00001)", class = "b", coef = "Population"),
+    set_prior("normal(0, 0.5)", class = "b", coef = "Unemployment.rate"),
+    set_prior("normal(0, 0.00001)", class = "b", coef = "Urban_population"),
+    set_prior("normal(0, 2)", class = "b", coef = "Latitude"),
+    set_prior("normal(0, 2)", class = "b", coef = "Longitude"),
+    set_prior(paste("student_t(3, 0,", std_logviews, ")"), class = "sigma"),
+    set_prior("student_t(3, 0, 10)", class = "Intercept")
+  ),
+  chains = 3, iter = 500, warmup = 100
+)
+
+summary(bayesian_model)
+str(merged_data)
+```
+
+# Stratified boostrap for different countries
+```{r}
+# Assuming merged_data is your dataset and it has columns 'Country' and 'views'
+
+# Bootstrap statistic function
+bs_statistic <- function(data, indices) {
+  resampled_data <- data[indices, ]
+  mean_views <- mean(resampled_data$views, na.rm = TRUE)
+  return(mean_views)
+}
+
+# Perform bootstrap for each country and calculate confidence intervals
+results_summary <- list()
+countries <- unique(merged_data$Country)
+
+for (country in countries) {
+  # Subset data for the country
+  country_merged_data <- merged_data[merged_data$Country == country, ]
+  
+  # Perform bootstrap
+  bs_result <- boot(country_merged_data, bs_statistic, R = 1000)
+
+  # Calculate confidence intervals
+  ci <- boot.ci(bs_result, type = c("basic", "perc"))
+
+  # Combine country name with confidence intervals
+  results_summary[[country]] <- list(
+    Country = country,
+    Basic_CI = ci$basic[4:5],   # Extracting the basic confidence interval
+    Percentile_CI = ci$percent[4:5] # Extracting the percentile confidence interval
+  )
+}
+
+# Print results
+print(results_summary)
+```
+
+bootstrap estimates and confidence intervals for the mean views for each country.  understand the variability and confidence in your estimates for each country.
+
+# Permutation Test - Median
+
+```{r}
+merged_data %>% group_by(Country) %>% count()
+```
+
+
+# Smoothing Method
+```{r}
+# Relationship between likes and views
+country_data <- merged_data[merged_data$Country == 'Canada',]
+
+# Creating a scatter plot with LOESS smoothing
+ggplot(country_data, aes(x = views, y = likes)) +
+  geom_point(alpha = 0.3) +  # Plot the raw data points with some transparency
+  geom_smooth(method = "loess", se = FALSE, color = "blue") +  # Add the LOESS-smoothed line
+  theme_minimal() +
+  labs(title = "Relationship Between Views and Likes",
+       x = "Views",
+       y = "Likes")
+```
+# time
+
+```{r}
+merged_data$trending_date <- as.Date(merged_data$trending_date, format = "%y.%d.%m")
+
+# Aggregate data by date to get average views per day
+daily_views <- aggregate(views ~ trending_date, data = merged_data, median)
+
+# Creating a time-series plot with LOESS smoothing
+ggplot(daily_views, aes(x = trending_date, y = views)) +
+  geom_line(alpha = 0.3) +  # Plot the raw data points as a line
+  geom_smooth(method = "loess", se = FALSE, color = "blue") +  # Add the LOESS-smoothed line
+  theme_minimal() +
+  labs(title = "Trend of Median Views Over Time",
+       x = "Date",
+       y = "Average Views")
+```
+# permutation test
+
+```{r}
+merged_data$logviews <- log(merged_data$views)
+# Calculate the original statistic using the transformed views
+original_stat <- function(data) {
+  aggregate(data$logviews, by = list(data$Country), FUN = mean)
+}
+
+# Conduct the permutation test
+perm_test <- function(data, k = 2000) {
+  # Get the original differences between the means of the countries
+  original_means <- original_stat(data)
+  original_diffs <- diff(original_means$x)
+  perm_diffs <- numeric(k)
+  for (i in 1:k) {
+    # Shuffle the transformed views
+    shuffled_views <- sample(data$logviews)
+    
+    # Calculate the differences with the shuffled data
+    perm_data <- data
+    perm_data$logviews <- shuffled_views
+    perm_means <- original_stat(perm_data)
+    perm_diffs[i] <- diff(perm_means$x)  
+  }
+  
+  # Calculate the p-value
+  p_value <- mean(abs(perm_diffs) >= abs(original_diffs))
+  return(list(p_value = p_value, perm_diffs = perm_diffs, original_diffs = original_diffs))
+}
+
+# Running the permutation test and storing results
+test_results <- perm_test(merged_data)
+# Now you can access perm_diffs
+perm_diffs <- test_results$perm_diffs
+
+p <- ggplot() + 
+  geom_histogram(aes(x = test_results$perm_diffs), binwidth = 0.1, fill = "white", alpha = 0.7) +
+  geom_vline(aes(xintercept = test_results$original_diffs), color = "green", linetype = "dashed", size = 1.5) +
+  labs(title = "Distribution of Permuted Differences Across Countries",
+       subtitle = paste("Original difference marked in green (p-value:", test_results$p_value, ")"),
+       x = "Differences in Mean log-views Across Countries",
+       y = "Frequency") +
+  theme_minimal()
+
+# Print the plot
+print(p)
+```
+
+
+```{r}
+original_stat <- function(data) {
+  aggregate(data$logviews, by = list(data$unemployment_category), FUN = mean)
+}
+
+# Conduct the permutation test
+perm_test <- function(data, k = 2000) {
+  # Get the original differences between the means of the countries
+  original_means <- original_stat(data)
+  original_diffs <- diff(original_means$x)
+  perm_diffs <- numeric(k)
+  for (i in 1:k) {
+    # Shuffle the transformed views
+    shuffled_views <- sample(data$logviews)
+    
+    # Calculate the differences with the shuffled data
+    perm_data <- data
+    perm_data$logviews <- shuffled_views
+    perm_means <- original_stat(perm_data)
+    perm_diffs[i] <- diff(perm_means$x)  
+  }
+  
+  # Calculate the p-value
+  p_value <- mean(abs(perm_diffs) >= abs(original_diffs))
+  return(list(p_value = p_value, perm_diffs = perm_diffs, original_diffs = original_diffs))
+}
+
+# Running the permutation test and storing results
+test_results <- perm_test(merged_data)
+# Now you can access perm_diffs
+perm_diffs <- test_results$perm_diffs
+
+p <- ggplot() + 
+  geom_histogram(aes(x = test_results$perm_diffs), binwidth = 0.1, fill = "white", alpha = 0.7) +
+  geom_vline(aes(xintercept = test_results$original_diffs), color = "green", linetype = "dashed", size = 1.5) +
+  labs(title = "Distribution of Permuted Differences Across Countries",
+       subtitle = paste("Original difference marked in green (p-value:", test_results$p_value, ")"),
+       x = "Differences in Mean log-views Across Countries",
+       y = "Frequency") +
+  theme_minimal()
+
+# Print the plot
+print(p)
+```
+
+
+
+# Histograms across demographic/socioeconomic factors
+```{r}
+merged_data <- merged_data %>%
+  mutate(unemployment_category = cut(Unemployment.rate,
+                                     breaks = quantile(Unemployment.rate, probs = c(0, 0.33, 0.67, 1), na.rm = TRUE),
+                                     labels = c("low", "middle", "high"),
+                                     include.lowest = TRUE)) %>%
+  mutate(territory_edu_category = cut(tertiary_edu_enroll,
+                                     breaks = quantile(tertiary_edu_enroll, probs = c(0, 0.33, 0.67, 1), na.rm = TRUE),
+                                     labels = c("low", "middle", "high"),
+                                     include.lowest = TRUE)) %>%
+  mutate(urbanization = Urban_population/Population) %>%
+  mutate(urbanization_category = cut(urbanization,
+                                     breaks = quantile(urbanization, probs = c(0, 0.33, 0.67, 1), na.rm = TRUE),
+                                     labels = c("low", "middle", "high"),
+                                     include.lowest = TRUE)) 
+```
+
+```{r}
+ggplot(merged_data, aes(x = log(success_index), fill = urbanization_category)) +
+  geom_histogram(position = 'identity', alpha = 0.6, bins = 10) +
+  facet_wrap(~urbanization_category) +
+  labs(title = "Adjusted Distribution of Success Index by Urbanziation Category",
+       x = "Success Index", y = "Frequency")
+```
+```{r}
+str(merged_data)
+```
+
+
+```{r}
+ggplot(merged_data, aes(x = log(success_index), fill = territory_edu_category)) +
+  geom_histogram(position = 'identity', alpha = 0.6, bins = 10) +
+  facet_wrap(~territory_edu_category) +
+  labs(title = "Adjusted Distribution of Success Index by Territory Edu Category",
+       x = "Success Index", y = "Frequency")
+```
+

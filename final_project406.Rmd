@@ -1,0 +1,392 @@
+---
+title: "report"
+author: "qwluo"
+date: "2023-12-08"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE)
+```
+
+
+# Large dataset
+
+# Data preprocessing
+
+```{r}
+df <- read.csv("youtube_data.csv")
+library(tidyverse)
+library(dplyr)
+library(readr)
+library(stringr)
+path_to_files <- "/Users/qianwenluo/Desktop/stats406/final project 406/Trending YouTube Video Statistics"
+# Create a vector of all CSV file names in the folder
+file_names <- list.files(path = path_to_files, pattern = "*.csv", full.names = TRUE)
+
+# Function to extract country name from file name
+extract_country <- function(file_path) {
+  file_name <- tools::file_path_sans_ext(basename(file_path))
+  return(file_name)
+}
+
+# Read, mutate, and combine all CSV files
+trending_ytb <- lapply(file_names, function(file) {
+  # Read the CSV file
+  data <- read_csv(file)
+  # Extract the country from the file name
+  country_name <- extract_country(file)
+  # Add the country name as a new column
+  mutate(data, country = country_name)
+}) %>%
+  bind_rows()
+
+trending_ytb <- trending_ytb %>%
+  filter(comments_disabled == FALSE) %>%
+  filter(ratings_disabled == FALSE) %>%
+  filter(video_error_or_removed == FALSE) %>%
+  mutate(country = str_sub(country, 1, 2)) %>%
+  select(video_id, trending_date, channel_title, category_id, views, likes, dislikes, comment_count, country) 
+
+trending_ytb <- trending_ytb %>%
+  mutate(country = case_when(
+    country == "RU" ~ "Russia",
+    country == "MX" ~ "Mexico",
+    country == "KR" ~ "South Korea",
+    country == "JP" ~ "Japan",
+    country == "IN" ~ "India",
+    country == "US" ~ "USA",
+    country == "GB" ~ "Great Britain",
+    country == "DE" ~ "Germany",
+    country == "CA" ~ "Canada",
+    country == "FR" ~ "France",
+    TRUE ~ country  # Keeps the original value if none of the above conditions are met
+  )) %>% 
+  rename(Country = country) %>%
+  print
+
+# Merge the demographic and socioeconomic variables into one large dataset
+names(df)[names(df) == "Gross.tertiary.education.enrollment...."] <- "tertiary_edu_enroll"
+
+ytb_selected <- df %>%
+  select(Country, tertiary_edu_enroll, Population, Unemployment.rate, Urban_population, Latitude, Longitude)
+  
+```
+```{r}
+ytb_selected <- ytb_selected %>%
+  group_by(Country) %>%
+  summarise(across(where(is.numeric), mean, na.rm = TRUE))
+
+merged_data <- inner_join(trending_ytb, ytb_selected, by = "Country")
+merged_data <- merged_data %>%
+  distinct(video_id, .keep_all = TRUE) %>%
+  na.omit()
+```
+
+```{r}
+# Created a new variable called “success_index”
+merged_data$success_index <- apply(scale(merged_data[, c("views", "likes", "comment_count")]), 1, mean)
+```
+
+
+# Part a
+
+# Create different levels of unemployment_category, territory_edu_category, and urbanization_category
+```{r}
+merged_data <- merged_data %>%
+  mutate(unemployment_category = cut(Unemployment.rate,
+                                     breaks = quantile(Unemployment.rate, probs = c(0, 0.33, 0.67, 1), na.rm = TRUE),
+                                     labels = c("low", "middle", "high"),
+                                     include.lowest = TRUE)) %>%
+  mutate(territory_edu_category = cut(tertiary_edu_enroll,
+                                     breaks = quantile(tertiary_edu_enroll, probs = c(0, 0.33, 0.67, 1), na.rm = TRUE),
+                                     labels = c("low", "middle", "high"),
+                                     include.lowest = TRUE)) %>%
+  mutate(urbanization = Urban_population/Population) %>%
+  mutate(urbanization_category = cut(urbanization,
+                                     breaks = quantile(urbanization, probs = c(0, 0.33, 0.67, 1), na.rm = TRUE),
+                                     labels = c("low", "middle", "high"),
+                                     include.lowest = TRUE)) 
+
+```
+
+# Data cleaning and processing
+there are non-finite values (like NaN or Inf) in your data, particularly in the success_index column or as a result of the log(success_index) transformation. This can happen if success_index contains zero or negative values, as the logarithm of zero or a negative number is undefined in real numbers. We can filter them out or transforming them in a way that avoids NaN values.
+
+```{r}
+# Check for zero or negative values in 'success_index'
+print(sum(merged_data$success_index <= 0))
+
+# Filter out rows where 'success_index' is zero or negative
+merged_data <- merged_data %>%
+  filter(success_index > 0)
+```
+
+```{r}
+ggplot(merged_data, aes(x = log(success_index), fill = unemployment_category)) +
+  geom_histogram(position = 'identity', alpha = 0.6, bins = 10) +
+  facet_wrap(~unemployment_category) +
+  labs(title = "Adjusted Distribution of Success Index by unemployment_category",
+       x = "Success Index", y = "Frequency")
+```
+
+```{r}
+ggplot(merged_data, aes(x = log(success_index), fill = territory_edu_category)) +
+  geom_histogram(position = 'identity', alpha = 0.6, bins = 10) +
+  facet_wrap(~territory_edu_category) +
+  labs(title = "Adjusted Distribution of Success Index by territory_edu_category",
+       x = "Success Index", y = "Frequency")
+```
+
+```{r}
+ggplot(merged_data, aes(x = log(success_index), fill = urbanization_category)) +
+  geom_histogram(position = 'identity', alpha = 0.6, bins = 10) +
+  facet_wrap(~urbanization_category) +
+  labs(title = "Adjusted Distribution of Success Index by Urbanziation Category",
+       x = "Success Index", y = "Frequency")
+```
+
+
+# Part b
+
+# Imports libraries
+```{r}
+library(boot)
+```
+
+# Stratified boostrap for different countries
+```{r}
+# Assuming merged_data is your dataset and it has columns 'Country' and 'views'
+
+# Bootstrap statistic function
+bs_statistic <- function(data, indices) {
+  resampled_data <- data[indices, ]
+  mean_views <- mean(resampled_data$views, na.rm = TRUE)
+  return(mean_views)
+}
+
+# Perform bootstrap for each country and calculate confidence intervals
+results_summary <- list()
+countries <- unique(merged_data$Country)
+
+for (country in countries) {
+  # Subset data for the country
+  country_merged_data <- merged_data[merged_data$Country == country, ]
+  
+  # Perform bootstrap
+  bs_result <- boot(country_merged_data, bs_statistic, R = 1000)
+
+  # Calculate confidence intervals
+  ci <- boot.ci(bs_result, type = c("basic", "perc"))
+
+  # Combine country name with confidence intervals
+  results_summary[[country]] <- list(
+    Country = country,
+    Basic_CI = ci$basic[4:5],   # Extracting the basic confidence interval
+    Percentile_CI = ci$percent[4:5] # Extracting the percentile confidence interval
+  )
+}
+
+# Print results
+print(results_summary)
+
+```
+
+
+
+# Part c 
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+```
+
+We can first start by visualizing the YouTube channel's success across different countries, territories education categories, and urbanization categories. 
+```{r}
+merged_data %>% 
+  group_by(Country) %>%
+  summarise(success_index = mean(success_index)) %>%
+  ggplot(aes(y = Country, success_index)) +
+  geom_bar(stat = "identity", fill = "blue")
+``` 
+
+
+There's a noticeable disparity in the success_index among YouTube channels from different countries. This suggests that the location of a channel can significantly impact its success potential. 
+Countries with a higher success index might have factors like larger audience bases, higher advertising rates, and more lucrative sponsorship opportunities, contributing to their channels' success. 
+The observation that Canada has the highest success index while France has the lowest suggests significant geographical disparities in how YouTube channels perform. 
+
+```{r}
+merged_data %>% 
+  group_by(territory_edu_category) %>%
+  summarise(success_index = mean(success_index)) %>%
+  ggplot(aes(y = territory_edu_category, success_index)) +
+  geom_bar(stat = "identity", fill = "red")
+```
+
+The middle level has the highest success index, approximately 0.2. This suggests that YouTube channels in territories with a middle level of educational focus or attainment tend to perform better than those in territories with higher or lower levels. This could be due to a balanced mix of audience education levels, leading to a broader appeal of content. The high level has a success index of about -0.75. The negative value is intriguing and might indicate that channels in highly educated territories face challenges in achieving high success indices. This could be due to factors like a more critical audience, diverse interests that are harder to cater to, or high competition among content creators. The low level has a success index of about -0.85, which is slightly lower than the high level. This suggests that territories with lower educational focus or attainment levels also struggle with channel success. Possible reasons could include a smaller or less engaged audience, limited access to technology, or fewer opportunities for monetization.
+
+
+```{r}
+# maybe delete this?
+merged_data %>% 
+  group_by(urbanization_category) %>%
+  summarise(success_index = mean(success_index)) %>%
+  ggplot(aes(y = urbanization_category, success_index)) +
+  geom_bar(stat = "identity", fill = "green")
+```
+
+This plot compares the average success index of YouTube channels across different levels of urbanization.
+Channels in areas with higher urbanization may have higher success indices, possibly due to factors like greater access to technology, larger local audiences, and more business opportunities.
+However, it's important to note that higher success indices in more urbanized areas might also reflect higher investments in content production. This means that while earnings might be higher, it doesn't necessarily translate to higher net profits due to potentially higher costs.
+
+
+
+1. **Analysis of Variance (ANOVA)**
+
+```{r}
+# ANOVA for success_index by Country
+anova_country <- aov(success_index ~ Country, data = merged_data)
+summary(anova_country)
+```
+To determine whether there are any statistically significant differences between the means of different groups, we use a one-way ANOVA test. In this case, the test is examining the differences in 'success_index' across various 'Countries' using the merged data. 
+
+The degree of freedom is 7, indicating that there are a total of 8 countries in this dataset. The F value is 1105. This is a measure of the ratio of the variance between groups to the variance within groups. A higher F value typically indicates a greater likelihood that there are significant differences between the means of the groups. The p-value is <2e-16 and is extremely small, suggesting that the observed differences in success index across different countries are highly unlikely to be due to random chance. 
+
+Given the very small p-value, we can reject the null hypothesis that there is no difference in the mean success index across countries. The large F value suggests a strong effect of the country on the success index. This means that the country a YouTube channel operates is likely a significant factor in its success. This ANOVA analysis provides strong evidence that the success of YouTube channels varies significantly by country. 
+
+
+
+```{r}
+# ANOVA for success_index by territory_edu_category
+anova_category <- aov(success_index ~ territory_edu_category , data = merged_data)
+summary(anova_category)
+```
+The ANOVA test shows a highly significant difference in the 'success_index' across different levels of 'territory_edu_category' since the p-value is <2e-16. The very small p-value allows us to reject the null hypothesis that there is no difference in the mean success index across these categories. The F value is 1781. This is a measure of the ratio of the variance between groups to the variance within groups. The large F value suggests a strong effect of 'territory_edu_category' on the success index. This means that the educational category of a territory is likely a significant factor in determining the success of YouTube channels. However, while ANOVA tells us that there is a significant difference, it doesn't specify which specific levels of 'territory_edu_category' are different from each other. It's important to consider other factors that might contribute to these differences, such as economic conditions, cultural factors, and audience preferences in each educational category. 
+
+```{r}
+# ANOVA for success_index by Urbanization Category
+# maybe delete this?
+anova_category <- aov(success_index ~ urbanization_category , data = merged_data)
+summary(anova_category)
+```
+
+# Permutation test 
+
+The null hypothesis in a permutation test for your scenario would be that there is no difference in the 'success_index' across different countries.
+
+The test involves randomly shuffling the 'success_index' values among the different countries and recalculating the test statistic (like the mean difference between groups) for each permutation. This process is repeated many times (e.g., 1000 or 10000 times) to build a distribution of the test statistic under the null hypothesis.
+
+The actual test statistic calculated from your data is then compared to this distribution. If your actual test statistic is extreme (e.g., in the top 5% of the permutation distribution), it suggests that the observed data is not consistent with the null hypothesis. 
+
+The p-value is calculated as the proportion of permutations where the test statistic was as extreme as, or more extreme than, the observed test statistic.
+
+```{r}
+library(dplyr)
+```
+
+```{r}
+# delete
+merged_data <- merged_data %>%
+  mutate(log_views = log(views))
+```
+
+
+
+
+
+```{r}
+# Extract success_index as a numeric vector for Canada and India
+canada_success_index <- merged_data[merged_data$Country == "Canada",]$log_views
+india_success_index <- merged_data[merged_data$Country == "India",]$log_views
+
+```
+
+```{r}
+permutation_test <- function(data1, data2, num_permutations = 1000) {
+  combined_data <- c(data1, data2)
+  observed_diff <- mean(data1, na.rm = TRUE) - mean(data2, na.rm = TRUE)
+  count <- 0
+
+  for (i in 1:num_permutations) {
+    permuted_data <- sample(combined_data)
+    new_data1 <- permuted_data[1:length(data1)]
+    new_data2 <- permuted_data[(length(data1) + 1):length(combined_data)]
+    new_diff <- mean(new_data1, na.rm = TRUE) - mean(new_data2, na.rm = TRUE)
+
+    if (abs(new_diff) >= abs(observed_diff)) {
+      count <- count + 1
+    }
+  }
+
+  p_value <- count / num_permutations
+  return(p_value)
+}
+
+# Run the permutation test
+set.seed(123)  # For reproducibility
+p_value <- permutation_test(canada_success_index, india_success_index)
+print(p_value)
+
+```
+
+
+
+
+
+
+
+
+
+```{r}
+# Extract success_index by country
+country_success <- merged_data %>% 
+                  group_by(Country) %>%
+                  summarise(success_index = mean(success_index))
+
+# Observed difference in means
+obs_diff <- country_success$success_index[1] - country_success$success_index[2]
+print(obs_diff)
+
+```
+
+```{r}
+permutations <- 1000
+perm_diffs <- numeric(permutations)
+for(i in 1:permutations) {
+  # Shuffle success_index across all rows
+  shuffled_index <- sample(merged_data$success_index)
+
+  # Assign the shuffled success_index back to the data
+  shuffled_data <- merged_data
+  shuffled_data$success_index <- shuffled_index
+
+  # Calculate mean success_index for each country in the shuffled data
+  shuffled_means <- shuffled_data %>%
+                    group_by(Country) %>%
+                    summarise(shuffled_mean = mean(success_index, na.rm = TRUE))
+
+  # Calculate difference in means for the shuffled data
+  perm_diffs[i] <- shuffled_means$shuffled_mean[1] - shuffled_means$shuffled_mean[2]
+}
+
+# p-value as proportion of permuted differences 
+# greater than or equal to observed difference  
+p_value <- mean(perm_diffs >= obs_diff)
+
+print(p_value)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
